@@ -2,12 +2,11 @@ name: Daily Pairs Screen
 
 on:
   schedule:
-    # 22:30 UTC, Mon-Fri. US markets (the latest-closing venue in the
-    # basket) close at 20:00-21:00 UTC depending on daylight saving, so
-    # this leaves a safety margin for Yahoo to publish the final daily
-    # bar before the pull runs. If you only care about UK/EU sectors,
-    # you could move this earlier (e.g. '30 17 * * 1-5', after LSE close).
-    - cron: '30 22 * * 1-5'
+    # Cron has no timezone/DST awareness, so we schedule both possible UTC
+    # times for 16:48 Europe/London and let the guard step below pick the
+    # right one for today's date. Whichever one is "wrong" just no-ops.
+    - cron: '48 15 * * 1-5'  # 16:48 UK time when on BST (UTC+1)
+    - cron: '48 16 * * 1-5'  # 16:48 UK time when on GMT (UTC+0)
   workflow_dispatch: {}  # adds a "Run workflow" button in the Actions tab, for manual testing
 
 jobs:
@@ -15,19 +14,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Check this is today's correct DST-adjusted slot
+        id: dst_check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          target_utc=$(TZ=Europe/London date -d "today 16:48" -u +%H:%M)
+          actual_utc=$(date -u +%H:%M)
+          if [ "$target_utc" = "$actual_utc" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping -- this slot ($actual_utc UTC) isn't today's DST-adjusted 16:48 Europe/London target ($target_utc UTC)."
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.dst_check.outputs.should_run == 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.dst_check.outputs.should_run == 'true'
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.dst_check.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run screener
+        if: steps.dst_check.outputs.should_run == 'true'
         run: python main.py
 
       - name: Email results
+        if: steps.dst_check.outputs.should_run == 'true'
         env:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -36,11 +56,8 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python send_email.py
 
-      # Fallback: also keep the raw CSV/HTML as a downloadable workflow
-      # artifact (30-day retention), in case the email step ever fails --
-      # runs even if the previous step errors, thanks to `if: always()`.
       - name: Upload output as artifact
-        if: always()
+        if: always() && steps.dst_check.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pairs-screen-output
