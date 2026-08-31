@@ -1,0 +1,48 @@
+name: Daily Pairs Screen
+
+on:
+  schedule:
+    # 22:30 UTC, Mon-Fri. US markets (the latest-closing venue in the
+    # basket) close at 20:00-21:00 UTC depending on daylight saving, so
+    # this leaves a safety margin for Yahoo to publish the final daily
+    # bar before the pull runs. If you only care about UK/EU sectors,
+    # you could move this earlier (e.g. '30 17 * * 1-5', after LSE close).
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch: {}  # adds a "Run workflow" button in the Actions tab, for manual testing
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run screener
+        run: python main.py
+
+      - name: Email results
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python send_email.py
+
+      # Fallback: also keep the raw CSV/HTML as a downloadable workflow
+      # artifact (30-day retention), in case the email step ever fails --
+      # runs even if the previous step errors, thanks to `if: always()`.
+      - name: Upload output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pairs-screen-output
+          path: output/
+          retention-days: 30
