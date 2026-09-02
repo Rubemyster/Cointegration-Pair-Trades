@@ -1,4 +1,4 @@
-"""
+​"""
 Builds the interactive HTML widget: a group-level summary, a clickable list
 of pairs that passed the Benjamini-Hochberg (FDR-controlled) cointegration
 test, and a detail panel (dual-axis price chart, spread+band chart,
@@ -10,6 +10,7 @@ CDN at view-time (so an internet connection is needed when *opening* the
 file, not when generating it).
 """
 
+import html
 import json
 import os
 from datetime import datetime
@@ -166,6 +167,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pairs Screening Report</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -233,6 +235,34 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   canvas { max-height: 280px; }
   .empty-state { color: var(--muted); padding: 40px; text-align: center; }
   .legend-note { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* Static fallback shown only when scripts don't run (iOS Quick Look,
+     Gmail's attachment preview). Invisible in any browser that executes
+     the payload script below, so desktop rendering is untouched. */
+  .noscript-fallback { margin-bottom: 20px; }
+  .noscript-fallback .sector-block { margin-bottom: 18px; }
+  .noscript-fallback h3 { font-size: 13px; margin: 0 0 8px 0; color: var(--accent); font-weight: 500; }
+  .noscript-note { font-size: 12px; color: var(--muted); background: #1b1f29;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+
+  /* Narrow screens only. Every rule here is inert at desktop widths --
+     the 640px-fixed-column layout, 4-across grids and 24px padding above
+     are all left exactly as they were. */
+  @media (max-width: 900px) {
+    body { padding: 14px; }
+    h1 { font-size: 18px; }
+    .sector-bar { flex-wrap: wrap; }
+    .sector-bar select { min-width: 0; width: 100%; }
+    .summary { grid-template-columns: repeat(2, 1fr); padding: 12px; gap: 10px; }
+    .layout { grid-template-columns: 1fr; gap: 14px; }
+    .panel { padding: 12px; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { font-size: 12px; }
+    th, td { padding: 7px 4px; }
+    canvas { max-height: 220px; }
+    .empty-state { padding: 24px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -246,8 +276,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div class="summary" id="summary-panel"></div>
 
+<noscript>
+<div class="noscript-fallback">
+  <div class="noscript-note">Scripts aren't running here, so the interactive report (sector filter, sortable list, charts) is unavailable. Below is a static snapshot of every pair that passed Benjamini-Hochberg. Open this file in a full browser to get the charts.</div>
+  __NOSCRIPT_TABLE__
+</div>
+</noscript>
+
 <div class="layout">
   <div class="panel">
+    <div class="table-scroll">
     <table>
       <thead>
         <tr>
@@ -260,6 +298,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       </thead>
       <tbody id="pair-list"></tbody>
     </table>
+    </div>
   </div>
 
   <div class="panel" id="detail-panel">
@@ -622,8 +661,83 @@ renderPairList();
 """
 
 
+def _fmt(value, digits=3):
+    """Mirrors the JS fmt() helper, for the no-script static table."""
+    if value is None:
+        return "&mdash;"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)):
+        return f"{value:.{digits}f}"
+    return html.escape(str(value))
+
+
+def _static_status(pair):
+    """Same three states statusBadge() renders, as plain text."""
+    if not pair.get("has_reversion_estimate"):
+        return "no signal"
+    return "breach" if pair["stats"].get("threshold_breached") else "clear"
+
+
+def build_noscript_table(multi_payload):
+    """
+    Renders every passing pair as a plain HTML table, one block per sector.
+
+    This is a read-only snapshot for environments that strip <script> tags
+    (iOS Quick Look, Gmail's attachment preview), where the JS-rendered
+    report would otherwise show as an empty shell. It lives inside
+    <noscript>, so any browser that runs the payload script never displays
+    it -- nothing about the desktop view changes.
+    """
+    blocks = []
+    for sector_name in multi_payload.get("sector_list", []):
+        sector = multi_payload["sectors"][sector_name]
+        group, pairs = sector["group"], sector["pairs"]
+
+        header = (
+            f"<h3>{html.escape(sector_name)} &mdash; {len(pairs)} of "
+            f"{group['n_pairs_tested']} pairs passed "
+            f"(estimation {group['estimation_start']} &rarr; trading end {group['trading_end']})</h3>"
+        )
+
+        if not pairs:
+            blocks.append(f'<div class="sector-block">{header}'
+                          '<div class="empty-state">No pairs passed.</div></div>')
+            continue
+
+        rows = []
+        for p in pairs:
+            s = p["stats"]
+            momentum = p.get("momentum") or {}
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(p['ticker_a'])} / {html.escape(p['ticker_b'])}</td>"
+                f"<td>{_fmt(s.get('eg_pvalue'), 4)}</td>"
+                f"<td>{_fmt(s.get('half_life_days'), 1)}</td>"
+                f"<td>{_fmt(s.get('latest_zscore'), 2)}</td>"
+                f"<td>{_fmt(s.get('max_abs_zscore'), 2)}</td>"
+                f"<td>{_static_status(p)}</td>"
+                f"<td>{_fmt(s.get('breach_date'))}</td>"
+                f"<td>{_fmt(momentum.get('momentum_read'))}</td>"
+                "</tr>"
+            )
+
+        blocks.append(
+            f'<div class="sector-block">{header}'
+            '<table><thead><tr>'
+            '<th>Pair</th><th>p-value</th><th>Half-life</th><th>Latest Z</th>'
+            '<th>Max |Z|</th><th>Status</th><th>Breach date</th><th>Momentum</th>'
+            '</tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>"
+        )
+
+    if not blocks:
+        return '<div class="empty-state">No sectors produced results.</div>'
+    return "\n".join(blocks)
+
+
 def render_html(payload):
-    return _HTML_TEMPLATE.replace("__PAYLOAD_JSON__", json.dumps(payload))
+    html_out = _HTML_TEMPLATE.replace("__NOSCRIPT_TABLE__", build_noscript_table(payload))
+    return html_out.replace("__PAYLOAD_JSON__", json.dumps(payload))
 
 
 def write_widget(payload, output_dir="output"):
