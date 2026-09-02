@@ -87,7 +87,7 @@ def fetch_price_data(tickers, total_months, end_date=None, max_missing_frac=0.05
     raw = yf.download(
         tickers,
         start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
+        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
         auto_adjust=True,  # 'Close' becomes the dividend/split-adjusted close
         progress=False,
         group_by="column",
