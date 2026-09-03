@@ -1,4 +1,4 @@
-​"""
+"""
 Builds the interactive HTML widget: a group-level summary, a clickable list
 of pairs that passed the Benjamini-Hochberg (FDR-controlled) cointegration
 test, and a detail panel (dual-axis price chart, spread+band chart,
