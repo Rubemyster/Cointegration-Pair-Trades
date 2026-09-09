@@ -7,6 +7,11 @@ on:
     - cron: '48 15 * * 1-5'  # 16:48 UK time when on BST (UTC+1)
     - cron: '48 16 * * 1-5'  # 16:48 UK time when on GMT (UTC+0)
   workflow_dispatch: {}  # adds a "Run workflow" button in the Actions tab, for manual testing
+
+# Needed so the publish step can push the built report to the gh-pages branch.
+permissions:
+  contents: write
+
 jobs:
   screen:
     runs-on: ubuntu-latest
@@ -36,18 +41,78 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping -- triggered by '$triggered_cron', but today's DST-correct slot is '$correct_cron'."
           fi
+
+      - name: Work out the Pages URL
+        id: pages_url
+        if: steps.dst_check.outputs.should_run == 'true'
+        run: |
+          # Pages serves project sites from the OWNER LOWERCASED, even if
+          # the account name is mixed-case; the repo path keeps its case.
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          owner_lc=$(echo "$owner" | tr '[:upper:]' '[:lower:]')
+          override="${{ secrets.PAGES_BASE_URL }}"
+          if [ -n "$override" ]; then
+            # Set this secret if you've attached a custom domain.
+            url="${override%/}"
+          elif [ "$(echo "$repo" | tr '[:upper:]' '[:lower:]')" = "$owner_lc.github.io" ]; then
+            url="https://$owner_lc.github.io"
+          else
+            url="https://$owner_lc.github.io/$repo"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Report will be published at $url"
+
       - uses: actions/checkout@v4
         if: steps.dst_check.outputs.should_run == 'true'
+
       - uses: actions/setup-python@v5
         if: steps.dst_check.outputs.should_run == 'true'
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         if: steps.dst_check.outputs.should_run == 'true'
         run: pip install -r requirements.txt
+
       - name: Run screener
         if: steps.dst_check.outputs.should_run == 'true'
         run: python main.py
+
+      - name: Stage report for Pages
+        if: steps.dst_check.outputs.should_run == 'true'
+        run: python publish.py
+
+      - name: Publish to GitHub Pages
+        if: steps.dst_check.outputs.should_run == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          # Keeps previously published runs on the branch, so reports/
+          # accumulates into an archive instead of being wiped each day.
+          keep_files: true
+          commit_message: "Report for ${{ github.run_id }}"
+
+      - name: Wait for Pages to serve the new build
+        if: steps.dst_check.outputs.should_run == 'true'
+        run: |
+          # The push above returns immediately; the Pages build that turns
+          # it into a live site is asynchronous and usually takes 30-90s.
+          # Without this the email can arrive before the URL works.
+          url="${{ steps.pages_url.outputs.url }}/"
+          for i in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -L "$url" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "Live after ~$((i * 10))s."
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code, waiting..."
+            sleep 10
+          done
+          echo "Pages didn't return 200 within 4 minutes -- sending the email anyway."
+          echo "(First-ever run? Enable Pages under Settings > Pages, source = gh-pages branch.)"
+
       - name: Email results
         if: steps.dst_check.outputs.should_run == 'true'
         env:
@@ -56,7 +121,9 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          REPORT_BASE_URL: ${{ steps.pages_url.outputs.url }}
         run: python send_email.py
+
       - name: Upload output as artifact
         if: always() && steps.dst_check.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
