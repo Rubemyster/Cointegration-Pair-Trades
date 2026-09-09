@@ -1,0 +1,31 @@
+# Generated report output -- timestamped every run, so committing these
+# means the repo grows without bound. The workflow already uploads them
+# as 30-day Actions artifacts and publishes them to Pages.
+output/
+test_output/
+
+# Staging directory built by publish.py before the Pages push. Rebuilt
+# from output/ on every run, never edited by hand.
+public/
+
+# Your trade log. Ignored by default because it records real positions,
+# and the repo may need to be public for Pages to serve the report on a
+# free plan. The tradeoff: it then lives only on whatever machine wrote
+# it, so back it up somewhere outside the repo if you rely on it. If the
+# repo is private and staying that way, delete this line -- committing it
+# is a reasonable way to keep the log in sync across machines.
+trades.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
