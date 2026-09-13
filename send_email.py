@@ -134,7 +134,7 @@ def main():
         server.send_message(msg)
 
     mode = f"link to {base_url}" if base_url else "attachments"
-    print(f"Emailed {mode} to {os.environ['EMAIL_TO']}")
+    print(f"Emailed {mode}")
 
 
 if __name__ == "__main__":
