@@ -1,50 +1,109 @@
 name: Daily Pairs Screen
+
+# Refreshes the published report after every market close relevant to
+# config.SECTORS, but emails only once a day.
+#
+# config.SECTORS spans eight exchanges, which collapse into two closing
+# moments:
+#
+#   European close -- LSE (.L) at 16:30 London, and Xetra (.DE), Euronext
+#     Paris (.PA) / Amsterdam (.AS), BME Madrid (.MC) and SIX (.SW) at
+#     17:30 CET. The UK and the continent change DST on the same Sundays,
+#     so CET is always London+1 and 17:30 CET IS 16:30 London -- one
+#     instant, not two. Run at 16:48 London, 18 minutes after.
+#
+#   US/Canada close -- NYSE/Nasdaq (no suffix) and TSX (.TO) at 16:00 ET.
+#     Toronto is in Eastern Time, so it closes with New York. Run at
+#     16:20 ET, 20 minutes after.
+#
+# The email goes out on the European slot only, keeping the existing
+# once-a-day 16:48 London delivery. The US slot re-runs the screener and
+# overwrites the published index.html, so the link in that email shows
+# US closing prices once you open it later in the evening.
 on:
   schedule:
-    # Cron has no timezone/DST awareness, so we schedule both possible UTC
-    # times for 16:48 Europe/London and let the guard step below pick the
-    # right one for today's date. Whichever one is "wrong" just no-ops.
-    - cron: '48 15 * * 1-5'  # 16:48 UK time when on BST (UTC+1)
-    - cron: '48 16 * * 1-5'  # 16:48 UK time when on GMT (UTC+0)
-  workflow_dispatch: {}  # adds a "Run workflow" button in the Actions tab, for manual testing
+    # Cron has no timezone/DST awareness, so each slot is scheduled at
+    # both possible UTC times and the guard step below picks the right
+    # one for today's date. Whichever one is "wrong" just no-ops.
+    - cron: '48 15 * * 1-5'  # 16:48 London when on BST (UTC+1) -- Europe close
+    - cron: '48 16 * * 1-5'  # 16:48 London when on GMT (UTC+0) -- Europe close
+    - cron: '20 20 * * 1-5'  # 16:20 ET when on EDT (UTC-4)     -- US/Canada close
+    - cron: '20 21 * * 1-5'  # 16:20 ET when on EST (UTC-5)     -- US/Canada close
+  workflow_dispatch:
+    inputs:
+      send_email:
+        description: 'Also send the email (manual runs only)'
+        type: boolean
+        default: true
 
 # Needed so the publish step can push the built report to the gh-pages branch.
 permissions:
   contents: write
+
+# Two slots a day can't overlap in practice (hours apart), but if a run
+# ever overruns, let it finish rather than racing the gh-pages push.
+concurrency:
+  group: pairs-screen-publish
+  cancel-in-progress: false
 
 jobs:
   screen:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check this is today's correct DST-adjusted slot
-        id: dst_check
+      - name: Work out which slot this is, and whether to email
+        id: slot
         run: |
+          # Manual runs always proceed; the email is opt-in via the input.
           if [ "${{ github.event_name }}" != "schedule" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "send_email=${{ github.event.inputs.send_email }}" >> "$GITHUB_OUTPUT"
+            echo "slot=manual" >> "$GITHUB_OUTPUT"
+            echo "Manual run (email=${{ github.event.inputs.send_email }})."
             exit 0
           fi
-          # Which cron string SHOULD be live today, based on the UK's
-          # actual current offset (BST = +0100, GMT = +0000)? Compared
-          # against the triggering cron expression itself (not clock time),
-          # since scheduled runs can start a few minutes late.
+
+          # Which cron string SHOULD be live today for each slot, based on
+          # the actual current UTC offset in each region? Compared against
+          # the triggering cron expression itself (not clock time), since
+          # scheduled runs can start several minutes late.
           uk_offset=$(TZ=Europe/London date +%z)
+          us_offset=$(TZ=America/New_York date +%z)
+
           if [ "$uk_offset" = "+0100" ]; then
-            correct_cron="48 15 * * 1-5"
+            europe_cron="48 15 * * 1-5"   # BST
           else
-            correct_cron="48 16 * * 1-5"
+            europe_cron="48 16 * * 1-5"   # GMT
           fi
-          triggered_cron="${{ github.event.schedule }}"
-          if [ "$triggered_cron" = "$correct_cron" ]; then
+
+          if [ "$us_offset" = "-0400" ]; then
+            us_cron="20 20 * * 1-5"       # EDT
+          else
+            us_cron="20 21 * * 1-5"       # EST
+          fi
+
+          triggered="${{ github.event.schedule }}"
+
+          if [ "$triggered" = "$europe_cron" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "send_email=true" >> "$GITHUB_OUTPUT"
+            echo "slot=europe_close" >> "$GITHUB_OUTPUT"
+            echo "European close slot -- publishing and emailing."
+          elif [ "$triggered" = "$us_cron" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "send_email=false" >> "$GITHUB_OUTPUT"
+            echo "slot=us_close" >> "$GITHUB_OUTPUT"
+            echo "US/Canada close slot -- publishing only, no email."
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping -- triggered by '$triggered_cron', but today's DST-correct slot is '$correct_cron'."
+            echo "send_email=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping -- '$triggered' is not a DST-correct slot today."
+            echo "(today: europe='$europe_cron', us='$us_cron')"
           fi
 
       - name: Work out the Pages URL
         id: pages_url
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         run: |
           # Pages serves project sites from the OWNER LOWERCASED, even if
           # the account name is mixed-case; the repo path keeps its case.
@@ -64,42 +123,45 @@ jobs:
           echo "Report will be published at $url"
 
       - uses: actions/checkout@v4
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
 
       - uses: actions/setup-python@v5
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run screener
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         run: python main.py
 
       - name: Stage report for Pages
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         run: python publish.py
 
       - name: Publish to GitHub Pages
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public
           # Keeps previously published runs on the branch, so reports/
-          # accumulates into an archive instead of being wiped each day.
+          # accumulates into an archive instead of being wiped each run.
+          # Note this now grows twice as fast -- two slots a day.
           keep_files: true
-          commit_message: "Report for ${{ github.run_id }}"
+          commit_message: "Report (${{ steps.slot.outputs.slot }}) for ${{ github.run_id }}"
 
       - name: Wait for Pages to serve the new build
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true' && steps.slot.outputs.send_email == 'true'
         run: |
           # The push above returns immediately; the Pages build that turns
           # it into a live site is asynchronous and usually takes 30-90s.
-          # Without this the email can arrive before the URL works.
+          # Without this the email can arrive before the URL works. Only
+          # needed on the slot that actually emails -- nobody is waiting
+          # on the US slot.
           url="${{ steps.pages_url.outputs.url }}/"
           for i in $(seq 1 24); do
             code=$(curl -s -o /dev/null -w "%{http_code}" -L "$url" || echo "000")
@@ -114,7 +176,7 @@ jobs:
           echo "(First-ever run? Enable Pages under Settings > Pages, source = gh-pages branch.)"
 
       - name: Email results
-        if: steps.dst_check.outputs.should_run == 'true'
+        if: steps.slot.outputs.should_run == 'true' && steps.slot.outputs.send_email == 'true'
         env:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -125,9 +187,9 @@ jobs:
         run: python send_email.py
 
       - name: Upload output as artifact
-        if: always() && steps.dst_check.outputs.should_run == 'true'
+        if: always() && steps.slot.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: pairs-screen-output
+          name: pairs-screen-output-${{ steps.slot.outputs.slot }}-${{ github.run_id }}
           path: output/
           retention-days: 30
